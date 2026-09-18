@@ -1,4 +1,4 @@
-#!/home/a/anaconda3/envs/yolo/bin/python
+#!/home/a/anaconda3/envs/yolo26/bin/python
 import os
 import sys
 import logging
@@ -30,8 +30,21 @@ DEFAULT_PUBLISH_TOPIC = "/perception/camera/yolo"
 DEFAULT_FRAME_ID = "camera_link"
 PACKAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # 모델 구조는 yaml에서 만들고, checkpoint는 weight 로딩에만 사용합니다.
-DEFAULT_YAML_CFG = os.path.join(PACKAGE_DIR, "models", "best.yaml")
-DEFAULT_PT_WEIGHTS = os.path.join(PACKAGE_DIR, "models", "best.pt")
+#DEFAULT_YAML_CFG = os.path.join(PACKAGE_DIR, "models", "best.yaml")
+#DEFAULT_PT_WEIGHTS = os.path.join(PACKAGE_DIR, "models", "best.pt")
+
+#TesnorRT 사용 시
+DEFAULT_ENGINE = os.path.join(
+    PACKAGE_DIR,
+    "models",
+    "best.engine"
+)
+
+engine_path = rospy.get_param(
+    "~engine",
+    DEFAULT_ENGINE
+)
+
 DEFAULT_POSTPROCESS_NMS_IOU = 0.5
 DEFAULT_POSTPROCESS_CONTAINMENT_IOA = 0.8
 DEFAULT_POSTPROCESS_AREA_WEIGHT = 0.1
@@ -198,8 +211,13 @@ class YoloDetectNode:
         self.previous_status_line_count = 0
         source_topic = rospy.get_param("~source", DEFAULT_SOURCE_TOPIC)
         publish_topic = rospy.get_param("~output_topic", DEFAULT_PUBLISH_TOPIC)
-        yaml_cfg = rospy.get_param("~yaml_cfg", DEFAULT_YAML_CFG)
-        pt_weights = rospy.get_param("~pt_weights", DEFAULT_PT_WEIGHTS)
+        #yaml_cfg = rospy.get_param("~yaml_cfg", DEFAULT_YAML_CFG)
+        #pt_weights = rospy.get_param("~pt_weights", DEFAULT_PT_WEIGHTS)
+
+        #TesnorRT 사용 시
+        engine_path = rospy.get_param("~engine", DEFAULT_ENGINE)
+        self.inference_times = []
+
         self.frame_id = rospy.get_param("~frame_id", DEFAULT_FRAME_ID)
         self.postprocess_nms_iou = rospy.get_param(
             "~postprocess_nms_iou",
@@ -250,10 +268,22 @@ class YoloDetectNode:
 
         self.pub = rospy.Publisher(publish_topic, Yolo_Objects, queue_size=1)
 
-        self.model = YOLO(yaml_cfg, task="detect").load(pt_weights)
+        #self.model = YOLO(yaml_cfg, task="detect").load(pt_weights)
+
+        #TesnorRT 사용 시
+        self.model = YOLO(
+            engine_path,
+            task="detect"
+        )
+        
         rospy.loginfo(f"[yolo_detect_node] YOLOv12 MODEL LOADED")
-        rospy.loginfo(f"[yolo_detect_node] yaml_cfg: {yaml_cfg}")
-        rospy.loginfo(f"[yolo_detect_node] pt_weights: {pt_weights}")
+        #rospy.loginfo(f"[yolo_detect_node] yaml_cfg: {yaml_cfg}")
+        #rospy.loginfo(f"[yolo_detect_node] pt_weights: {pt_weights}")
+
+        # TENSorRT 사용 시
+        rospy.loginfo("[yolo_detect_node] TensorRT MODEL LOADED")
+        rospy.loginfo(f"[yolo_detect_node] engine: {engine_path}")
+
         rospy.loginfo(f"[yolo_detect_node] frame_id: {self.frame_id}")
         rospy.loginfo(
             f"[yolo_detect_node] inference confidence: {self.conf_thres}"
@@ -310,7 +340,27 @@ class YoloDetectNode:
         frame = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
         h0, w0 = frame.shape[:2]
 
-        results = self.model(frame, imgsz=(h0, w0), conf=self.conf_thres)[0]
+        #results = self.model(frame, imgsz=(h0, w0), conf=self.conf_thres)[0]
+
+        #TesnorRT 사용 시
+        results = self.model(
+            frame,
+            imgsz=640,
+            conf=self.conf_thres,
+            verbose=False
+        )[0]
+        inference_ms = results.speed["inference"]
+
+        self.inference_times.append(inference_ms)
+        
+        if len(self.inference_times) > 20:
+            valid_times = self.inference_times[20:]  # 처음 20프레임 warm-up 제외
+            avg_ms = sum(valid_times) / len(valid_times)
+        
+            print(
+                f"Inference: {inference_ms:.2f} ms | "
+                f"Average: {avg_ms:.2f} ms"
+            )
 
         frame_id = msg.header.frame_id if msg.header.frame_id else self.frame_id
         out = Yolo_Objects()
